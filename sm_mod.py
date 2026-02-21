@@ -60,11 +60,17 @@ class abrir(State):
         # Nombres articulaciones Unity
         msg.name = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'] 
         
-        pos = math.radians(0.0)
-        msg.position = [pos] * len(msg.name) # Un valor por cada nombre en msg.name
+        #pos = math.radians(0.0)
+        i = -90
 
         while rclpy.ok() and self._node.continuar is None:
-            self._node._pub_cmd.publish(msg)
+            if i < 0:
+                pos = math.radians(i)
+                msg.position = [pos] * len(msg.name) # Un valor por cada nombre en msg.name
+                self._node._pub_cmd.publish(msg)
+                i += 1
+            else:
+                self._node._pub_cmd.publish(msg)
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
         if self._node.continuar:
@@ -73,12 +79,12 @@ class abrir(State):
             return 'abierto_e'
 
 ###########################################
-#                   CERRAR                #
+#                 CERRAR                  #
 ###########################################
 
 class cerrar(State):
     """
-    Estado que sirve para cerrar la mano modelada en Unity.
+    Estado que sirve para cerrar la mano de 4 en 4.
     """
     def __init__(self, node):
         super().__init__(['cerrado_a', 'cerrado_e'])
@@ -89,16 +95,42 @@ class cerrar(State):
         self._node.continuar = None
 
         msg = JointState()
-        msg.header.stamp = self._node.get_clock().now().to_msg()
+        # Nombres de las 16 articulaciones (a-p)
+        msg.name = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p']
         
-        # Nombres articulaciones Unity
-        msg.name = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'] 
+        # Inicializamos todas en 0 (abierto)
+        current_positions = [0.0] * len(msg.name)
         
-        pos = math.radians(90.0)
-        msg.position = [pos] * len(msg.name) # Un valor por cada nombre en msg.name
+        # Definimos los 4 grupos de índices (0-3, 4-7, 8-11, 12-15)
+        grupos = [range(0, 4), range(4, 8), range(8, 12), range(12, 16)]
 
+        for grupo in grupos:
+            # Si el usuario mandó una transición durante el proceso, paramos
+            if self._node.continuar is not None:
+                break
+                
+            # Animación de cierre para el grupo actual
+            i = 0
+            while rclpy.ok() and i > -90:
+                pos_rad = math.radians(i)
+                
+                # Actualizamos solo los dedos del grupo actual
+                for idx in grupo:
+                    current_positions[idx] = pos_rad
+                
+                msg.header.stamp = self._node.get_clock().now().to_msg()
+                msg.position = current_positions
+                self._node._pub_cmd.publish(msg)
+                
+                i -= 1  # Velocidad de cierre
+                time.sleep(0.01)
+            
+            # Pausa entre el cierre de un grupo y el siguiente
+            time.sleep(0.5)
+            rclpy.spin_once(self._node, timeout_sec=0.1)
+
+        # Esperar a que el usuario decida el siguiente estado si no lo hizo ya
         while rclpy.ok() and self._node.continuar is None:
-            self._node._pub_cmd.publish(msg)
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
         if self._node.continuar:
@@ -125,7 +157,7 @@ def main(args=None):
                  transitions={'cerrado_a':'abrir',
                               'cerrado_e':'end'})
     
-    sm.set_start_state('cerrar')
+    sm.set_start_state('abrir')
     sm.validate()
 
     outcome = sm()
