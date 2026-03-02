@@ -26,15 +26,8 @@ class HandNode(Node):
     def __init__(self):
         super().__init__("state_machine_mod")
         self.continuar = None
-        self.pos = None
         self._pub_cmd = self.create_publisher(JointState, '/fingers', 10)
         self._sub_cmd = self.create_subscription(String, '/transition', self.cb_transition, 10)
-        self._sub_pos = self.create_subscription(JointState, '/pos', self.cb_pos, 10)
-
-    def cb_pos(self, msg):
-        pos_deg = [-math.degrees(p) for p in msg.position]
-        self.pos = [round(p, 0) for p in pos_deg]
-        print(self.pos)
     
     def cb_transition(self, msg):
         cmd = msg.data.lower()
@@ -62,9 +55,22 @@ class abrir(State):
     def __init__(self, node):
         super().__init__(['abierto_c', 'abierto_e', 'abierto_p', 'abierto_ac'])
         self._node = node
+        self._sub_pos = self._node.create_subscription(JointState, '/pos', self.cb_pos, 10)
+        self.pos = None
+
+    def cb_pos(self, msg):
+        pos_deg = [-math.degrees(p) for p in msg.position]
+        self.pos = [round(p, 0) for p in pos_deg]
     
     def execute(self, blackboard):
         print('ABRIENDO MANO')
+
+        if self.pos is None:
+            self._node.get_logger().warn("Esperando datos de posición...")
+            while self.pos is None and rclpy.ok():
+                rclpy.spin_once(self._node, timeout_sec=0.1)
+            print("Posición recibida")
+        
         self._node.continuar = None
 
         msg = JointState()
@@ -73,16 +79,15 @@ class abrir(State):
         # Nombres articulaciones Unity
         msg.name = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'] 
         
-        i = -90
+        position = self.pos
+        msg.position = [0.0] * len(msg.name)
 
-        while rclpy.ok() and self._node.continuar is None:
-            if i < 0:
-                pos = math.radians(i)
-                msg.position = [pos] * len(msg.name) # Un valor por cada nombre en msg.name
-                self._node._pub_cmd.publish(msg)
-                i += 1
-            else:
-                self._node._pub_cmd.publish(msg)
+        while rclpy.ok() and (self._node.continuar is None or self._node.continuar == "abrir"):
+            for i in range(len(msg.name)):
+                if position[i] <= 0:
+                    position[i] += 1
+                    msg.position[i] = math.radians(position[i])
+            self._node._pub_cmd.publish(msg)
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
         if self._node.continuar == "cerrar":
@@ -103,7 +108,7 @@ class agarre_completo(State):
     Estado que sirve para agarrar con la mano cerrada.
     """
     def __init__(self, node):
-        super().__init__(['agarre_a', 'agarre_e', 'agarre_p', 'agarre_c'])
+        super().__init__(['agarre_a', 'agarre_e'])
         self._node = node
     
     def execute(self, blackboard):
@@ -145,17 +150,15 @@ class agarre_completo(State):
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
         # Esperar a que el usuario decida el siguiente estado si no lo hizo ya
-        while rclpy.ok() and self._node.continuar is None:
+        while rclpy.ok() and (self._node.continuar != "abrir"):
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
         if self._node.continuar == "abrir":
             return 'agarre_a'
-        elif self._node.continuar == "pinza":
-            return 'agarre_p'
-        elif self._node.continuar == "cerrar":
-            return 'agarre_c'
         elif self._node.continuar == "end":
             return 'cerrado_e'
+        else:
+            print("Transición incorrecta")
         
 ###########################################
 #                 PINZA                   #
@@ -166,7 +169,7 @@ class pinza(State):
     Estado que sirve para agarrar en modo pinza.
     """
     def __init__(self, node):
-        super().__init__(['pinza_a', 'pinza_e', 'pinza_c', 'pinza_ac'])
+        super().__init__(['pinza_a', 'pinza_e'])
         self._node = node
     
     def execute(self, blackboard):
@@ -182,7 +185,7 @@ class pinza(State):
 
         # --- FASE 1: Articulaciones generales ---
         i = 0
-        while rclpy.ok() and i >= -90 and self._node.continuar is None:
+        while rclpy.ok() and i >= -90 and (self._node.continuar != "abrir"):
             pos_rad = math.radians(i)
             # Solo actualizamos las que NO son especiales
             for idx in range(len(msg.name)):
@@ -200,7 +203,7 @@ class pinza(State):
         # --- FASE 2: Articulaciones especiales ---
         time.sleep(1)
         j = 0
-        while rclpy.ok() and j >= -15 and self._node.continuar is None:
+        while rclpy.ok() and j >= -15 and (self._node.continuar != "abrir"):
             pos_rad = math.radians(j)
             # Solo actualizamos las especiales
             for idx in indices_especiales:
@@ -215,19 +218,15 @@ class pinza(State):
             rclpy.spin_once(self._node, timeout_sec=0.01)
 
         # --- ESPERA FINAL (Bucle original para transición) ---
-        while rclpy.ok() and self._node.continuar is None:
+        while rclpy.ok() and (self._node.continuar != "abrir"):
             msg.header.stamp = self._node.get_clock().now().to_msg()
             msg.position = current_positions
             self._node._pub_cmd.publish(msg)
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
         # Estructura de retorno original
-        if self._node.continuar == "cerrar":
-            return 'pinza_c'
-        elif self._node.continuar == "abrir":
+        if self._node.continuar == "abrir":
             return 'pinza_a'
-        elif self._node.continuar == "agarre_completo":
-            return 'pinza_ac'
         elif self._node.continuar == "end":
             return 'pinza_e'
         
@@ -240,7 +239,7 @@ class cerrar(State):
     Estado que sirve para cerrar la mano.
     """
     def __init__(self, node):
-        super().__init__(['cerrado_ac', 'cerrado_e', 'cerrado_p', 'cerrado_a'])
+        super().__init__(['cerrado_e', 'cerrado_a'])
         self._node = node
     
     def execute(self, blackboard):
@@ -256,7 +255,7 @@ class cerrar(State):
 
         # --- FASE 1: Articulaciones generales ---
         i = 0
-        while rclpy.ok() and i >= -90 and self._node.continuar is None:
+        while rclpy.ok() and i >= -90 and (self._node.continuar != "abrir"):
             pos_rad = math.radians(i)
             # Solo actualizamos las que NO son especiales
             for idx in range(len(msg.name)):
@@ -274,7 +273,7 @@ class cerrar(State):
         # --- FASE 2: Articulaciones especiales ---
         time.sleep(1)
         j = 0
-        while rclpy.ok() and j >= -90 and self._node.continuar is None:
+        while rclpy.ok() and j >= -45 and (self._node.continuar != "abrir"):
             pos_rad = math.radians(j)
             # Solo actualizamos las especiales
             for idx in indices_especiales:
@@ -289,18 +288,14 @@ class cerrar(State):
             rclpy.spin_once(self._node, timeout_sec=0.01)
 
         # --- ESPERA FINAL (Bucle original para transición) ---
-        while rclpy.ok() and self._node.continuar is None:
+        while rclpy.ok() and (self._node.continuar != "abrir"):
             msg.header.stamp = self._node.get_clock().now().to_msg()
             msg.position = current_positions
             self._node._pub_cmd.publish(msg)
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
-        if self._node.continuar == "agarre_completo":
-            return 'cerrado_ac'
-        elif self._node.continuar == "abrir":
+        if self._node.continuar == "abrir":
             return 'cerrado_a'
-        elif self._node.continuar == "pinza":
-            return 'cerrado_p'
         elif self._node.continuar == "end":
             return 'cerrado_e'
 
@@ -322,20 +317,14 @@ def main(args=None):
     
     sm.add_state('cerrar', cerrar(node),
                  transitions={'cerrado_a':'abrir',
-                              'cerrado_p':'pinza',
-                              'cerrado_ac':'agarre_completo',
                               'cerrado_e':'end'})
     
     sm.add_state('pinza', pinza(node),
                  transitions={'pinza_a':'abrir',
-                              'pinza_c':'cerrar',
-                              'pinza_ac':'agarre_completo',
                               'pinza_e':'end'})
     
     sm.add_state('agarre_completo', agarre_completo(node),
-                 transitions={'agarre_c':'cerrar',
-                              'agarre_p':'pinza',
-                              'agarre_a':'abrir',
+                 transitions={'agarre_a':'abrir',
                               'agarre_e':'end'})
     
     sm.set_start_state('abrir')
