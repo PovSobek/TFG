@@ -12,7 +12,7 @@ from yasmin.blackboard import Blackboard
 from yasmin_ros import ActionState
 
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import String, Float64
 import math
 
 ###########################################
@@ -26,14 +26,19 @@ class HandNode(Node):
     def __init__(self):
         super().__init__("state_machine_mod")
         self.continuar = None
+        self.pos = None
+        self.proportion = 0.0
         self._pub_cmd = self.create_publisher(JointState, '/fingers', 10)
         self._sub_cmd = self.create_subscription(String, '/transition', self.cb_transition, 10)
         self._sub_pos = self.create_subscription(JointState, '/pos', self.cb_pos, 10)
-        self.pos = None
-
+        self._sub_emg = self.create_subscription(Float64, '/proportional', self.cb_emg, 10)
+        
     def cb_pos(self, msg):
         pos_deg = [-math.degrees(p) for p in msg.position]
         self.pos = [round(p, 0) for p in pos_deg]
+
+    def cb_emg(self, msg):
+        self.proportion = msg.data
     
     def cb_transition(self, msg):
         cmd = msg.data.lower()
@@ -43,6 +48,8 @@ class HandNode(Node):
             self.continuar = "abrir"
         elif cmd == "c":
             self.continuar = "pinza"
+        elif cmd == "d":
+            self.continuar = "agarre_completo"
         elif cmd == "e":
             self.continuar = "end"
 
@@ -55,7 +62,7 @@ class abrir(State):
     Estado que sirve para abrir la mano modelada en Unity.
     """
     def __init__(self, node):
-        super().__init__(['abierto_c', 'abierto_e', 'abierto_p'])
+        super().__init__(['abierto_c', 'abierto_e', 'abierto_p', 'abierto_ac'])
         self._node = node
     
     def execute(self, blackboard):
@@ -83,6 +90,8 @@ class abrir(State):
                 if position[i] <= 0:
                     position[i] += 1
                     msg.position[i] = math.radians(position[i])
+                else:
+                    msg.position[i] = math.radians(0)
             self._node._pub_cmd.publish(msg)
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
@@ -90,9 +99,70 @@ class abrir(State):
             return 'abierto_c'
         elif self._node.continuar == "pinza":
             return 'abierto_p'
+        elif self._node.continuar == "agarre_completo":
+            return 'abierto_ac'
         elif self._node.continuar == "end":
             return 'abierto_e'
 
+###########################################
+#             AGARRE COMPLETO             #
+###########################################
+
+class agarre_completo(State):
+    """
+    Estado que sirve para agarrar con la mano cerrada.
+    """
+    def __init__(self, node):
+        super().__init__(['agarre_a', 'agarre_e'])
+        self._node = node
+    
+    def execute(self, blackboard):
+        print('AGARRE COMPLETO')
+        self._node.continuar = None
+
+        msg = JointState()
+        msg.name = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p']
+        indices_especiales = {9, 14, 15}
+        
+        # Inicializamos todas en 0.0
+        current_positions = [0.0] * len(msg.name)
+
+        i = 0
+        j = 0
+
+        while rclpy.ok() and (self._node.continuar != "abrir"):
+            pos_rad = math.radians(i)
+            pos_rad_esp = math.radians(j)
+
+            for idx in range(len(msg.name)):
+                if idx not in indices_especiales:
+                    current_positions[idx] = pos_rad
+                elif idx in indices_especiales:
+                    current_positions[idx] = pos_rad_esp
+
+            current_positions[4] = pos_rad + 5
+
+            msg.header.stamp = self._node.get_clock().now().to_msg()
+            msg.position = current_positions
+            self._node._pub_cmd.publish(msg)
+
+            if i >= -90*self._node.proportion:
+                i -= 1
+            elif i < -90*self._node.proportion:
+                i += 1
+
+            if j >= -45*self._node.proportion:
+                j -= 0.25
+            elif j < -45*self._node.proportion:
+                j += 0.5
+
+            rclpy.spin_once(self._node, timeout_sec=0.1)
+
+        if self._node.continuar == "abrir":
+            return 'agarre_a'
+        elif self._node.continuar == "end":
+            return 'agarre_e'
+        
 ###########################################
 #                 PINZA                   #
 ###########################################
@@ -179,7 +249,7 @@ class cerrar(State):
 
         msg = JointState()
         msg.name = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p']
-        indices_especiales = {9, 14, 15} #j, o, p
+        indices_especiales = {9, 14, 15}
         
         # Inicializamos todas en 0.0
         current_positions = [0.0] * len(msg.name)
@@ -241,17 +311,20 @@ def main(args=None):
     sm.add_state('abrir', abrir(node),
                  transitions={'abierto_c':'cerrar',
                               'abierto_p':'pinza',
+                              'abierto_ac':'agarre_completo',
                               'abierto_e':'end'})
     
     sm.add_state('cerrar', cerrar(node),
                  transitions={'cerrado_a':'abrir',
-                              'cerrado_c':'cerrar',
                               'cerrado_e':'end'})
     
     sm.add_state('pinza', pinza(node),
                  transitions={'pinza_a':'abrir',
-                              'pinza_p':'pinza',
                               'pinza_e':'end'})
+    
+    sm.add_state('agarre_completo', agarre_completo(node),
+                 transitions={'agarre_a':'abrir',
+                              'agarre_e':'end'})
     
     sm.set_start_state('abrir')
     sm.validate()
