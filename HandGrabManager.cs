@@ -15,6 +15,7 @@ namespace RosSharp.RosBridgeClient
         public float grabThreshold = -75f;
         public float releaseThreshold = -20f;
         public float grabSearchRadius = 0.12f;
+        public Vector3 grabOffset = Vector3.zero; // <-- Nueva variable para el offset
         public LayerMask grabbableLayerMask = ~0;
 
         private GameObject grabbedObject = null;
@@ -22,6 +23,9 @@ namespace RosSharp.RosBridgeClient
         private bool isCurrentlyGrabbing = false;
         private Vector3 relativePos;
         private Quaternion relativeRot;
+
+        // Propiedad auxiliar para obtener la posición real de la esfera en espacio de mundo
+        private Vector3 SphereCenter => grabAnchor != null ? grabAnchor.TransformPoint(grabOffset) : transform.position;
 
         void Update()
         {
@@ -66,16 +70,16 @@ namespace RosSharp.RosBridgeClient
 
         private void OnGrabStart()
         {
-            Collider[] hits = Physics.OverlapSphere(grabAnchor.position, grabSearchRadius, grabbableLayerMask);
+            // Usamos SphereCenter que ya incluye el offset aplicado al grabAnchor
+            Collider[] hits = Physics.OverlapSphere(SphereCenter, grabSearchRadius, grabbableLayerMask);
             GameObject target = null;
+
             foreach (var hit in hits)
             {
                 if (handRoot != null && hit.transform.IsChildOf(handRoot)) continue;
 
-                // Identificamos el posible objetivo (objeto o su Rigidbody)
                 GameObject potentialTarget = hit.attachedRigidbody ? hit.attachedRigidbody.gameObject : hit.gameObject;
 
-                // SOLO si tiene la etiqueta "Interactuable", lo asignamos como target y salimos del bucle
                 if (potentialTarget.CompareTag("Interactuable"))
                 {
                     target = potentialTarget;
@@ -106,9 +110,22 @@ namespace RosSharp.RosBridgeClient
             if (rb != null) { rb.isKinematic = false; rb.detectCollisions = true; rb.useGravity = true; }
 
             grabbedObject.transform.SetParent(originalParent, true);
-            jointSubscriber.ReleaseAllLocks(); // <--- IMPORTANTE: Desbloquear dedos
+            jointSubscriber.ReleaseAllLocks();
             grabbedObject = null;
             isCurrentlyGrabbing = false;
+        }
+
+        void OnDrawGizmos()
+        {
+            if (grabAnchor == null) return;
+        
+            Gizmos.color = Color.yellow;
+            // Dibujamos la esfera en la misma posición calculada para el OverlapSphere
+            Gizmos.DrawWireSphere(SphereCenter, grabSearchRadius);
+            
+            // Dibujamos una pequeña línea desde el ancla hasta el centro de la esfera para referencia visual
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawLine(grabAnchor.position, SphereCenter);
         }
     }
 }
